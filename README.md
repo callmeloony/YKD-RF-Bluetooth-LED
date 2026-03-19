@@ -4,7 +4,7 @@
 ![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2024.1+-blue.svg?style=for-the-badge&logo=home-assistant)
 ![License](https://img.shields.io/badge/License-MIT-green.svg?style=for-the-badge)
 
-Ця користувацька інтеграція дозволяє підключити бюджетні Bluetooth LED-стрічки (моделі **YKD-RF** та аналоги) безпосередньо до вашого Home Assistant. Жодних хмарних сервісів чи сторонніх хабів — повний локальний контроль.
+Ця користувацька інтеграція дозволяє підключити бюджетні Bluetooth одноколірні LED-стрічки (моделі **YKD-RF** та аналоги) безпосередньо до вашого Home Assistant. Жодних хмарних сервісів чи сторонніх хабів — повний локальний контроль.
 
 ---
 
