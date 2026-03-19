@@ -1,0 +1,21 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Налаштування YKD-RF LED",
+        "description": "Введіть назву для вашої стрічки та її Bluetooth MAC-адресу.",
+        "data": {
+          "name": "Назва пристрою",
+          "address": "Bluetooth MAC-адреса"
+        }
+      }
+    },
+    "error": {
+      "invalid_mac": "Невірний формат MAC-адреси (має бути XX:XX:XX:XX:XX:XX)",
+      "cannot_connect": "Не вдалося підключитися"
+    },
+    "abort": {
+      "already_configured": "Цей пристрій вже додано"
+    }
+  }
+}

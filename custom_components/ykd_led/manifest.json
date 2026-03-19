@@ -1,0 +1,11 @@
+{
+  "domain": "ykd_led",
+  "name": "YKD-RF Bluetooth LED",
+  "version": "1.1.0",
+  "documentation": "https://github.com/callmeloony/YKD-RF-Bluetooth-LED",
+  "issue_tracker": "https://github.com/callmeloony/YKD-RF-Bluetooth-LED/issues",
+  "codeowners": ["@callmeloony"],
+  "requirements": ["bleak"],
+  "iot_class": "local_push",
+  "config_flow": true
+}
