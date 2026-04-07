@@ -5,7 +5,11 @@
   "documentation": "https://github.com/callmeloony/YKD-RF-Bluetooth-LED",
   "issue_tracker": "https://github.com/callmeloony/YKD-RF-Bluetooth-LED/issues",
   "codeowners": ["@callmeloony"],
-  "requirements": ["bleak"],
   "iot_class": "local_push",
+  "requirements": [
+    "bleak>=0.21.1",
+    "bleak-retry-connector>=3.17.1"
+  ],
+  "dependencies": ["bluetooth"],
   "config_flow": true
 }
