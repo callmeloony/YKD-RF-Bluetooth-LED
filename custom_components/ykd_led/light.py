@@ -1,5 +1,6 @@
 import logging
 import asyncio
+from bleak_retry_connector import establish_connection
 from homeassistant.components.light import (
     ATTR_BRIGHTNESS,
     ATTR_EFFECT,
@@ -55,15 +56,29 @@ class YKDBleLight(LightEntity):
     def color_mode(self): return ColorMode.BRIGHTNESS
 
     async def _get_client(self):
-        """Отримує існуючий клієнт або створює новий."""
-        if self._client is not None and self._client.is_connected:
+            """Отримує існуючий клієнт або створює новий через retry-connector."""
+            if self._client is not None and self._client.is_connected:
+                self._reset_disconnect_timer()
+                return self._client
+            
+            # Отримуємо BLE пристрій з системи (це важливо для стабільності)
+            from homeassistant.components.bluetooth import async_ble_device_from_address
+            device = async_ble_device_from_address(self.hass, self._address, connectable=True)
+            
+            if not device:
+                raise Exception(f"Пристрій {self._address} не знайдено в радіусі дії")
+    
+            # Використовуємо рекомендований метод підключення
+            self._client = await establish_connection(
+                BleakClient, 
+                device, 
+                self._name, 
+                use_services_cache=True,
+                disconnected_callback=lambda client: _LOGGER.debug("Device %s disconnected", self._address)
+            )
+            
             self._reset_disconnect_timer()
             return self._client
-        
-        self._client = BleakClient(self._address, timeout=10.0)
-        await self._client.connect()
-        self._reset_disconnect_timer()
-        return self._client
 
     def _reset_disconnect_timer(self):
         """Скидає таймер роз'єднання."""
