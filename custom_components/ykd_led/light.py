@@ -98,18 +98,35 @@ class YKDBleLight(LightEntity):
             self._client = None
 
     async def _send_commands(self, commands):
-        """Відправка списку команд в одній сесії."""
-        async with self._lock:
-            try:
-                client = await self._get_client()
-                for cmd in commands:
-                    await client.write_gatt_char(CHARACTERISTIC_UUID, bytearray.fromhex(cmd))
-                    await asyncio.sleep(0.1)
-                return True
-            except Exception as e:
-                _LOGGER.error("BLE Error for %s: %s", self._address, e)
-                self._client = None
-                return False
+            """Відправка списку команд в одній сесії."""
+            async with self._lock:
+                try:
+                    # Перевіряємо, чи це нове підключення
+                    is_new_connection = self._client is None or not self._client.is_connected
+                    
+                    client = await self._get_client()
+                    
+                    # Якщо ми щойно підключилися, даємо контролеру 0.5 сек 
+                    # "прийти до тями", перш ніж штовхати в нього команди
+                    if is_new_connection:
+                        await asyncio.sleep(0.5)
+                    
+                    for cmd in commands:
+                        # КЛЮЧОВА ЗМІНА: додаємо response=False
+                        # Це змушує HA відправляти команду миттєво, не чекаючи відповіді
+                        await client.write_gatt_char(
+                            CHARACTERISTIC_UUID, 
+                            bytearray.fromhex(cmd), 
+                            response=False
+                        )
+                        # Пауза між командами, щоб примітивний чіп встиг їх "перетравити"
+                        await asyncio.sleep(0.2)
+                        
+                    return True
+                except Exception as e:
+                    _LOGGER.error("BLE Error for %s: %s", self._address, e)
+                    self._client = None
+                    return False
 
     async def async_turn_on(self, **kwargs):
         commands = [CMD_ON]
