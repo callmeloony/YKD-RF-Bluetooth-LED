@@ -1,6 +1,6 @@
 import logging
 import asyncio
-from bleak_retry_connector import establish_connection
+from bleak_retry_connector import establish_connection, BleakNotFoundError
 from homeassistant.components.light import (
     ATTR_BRIGHTNESS,
     ATTR_EFFECT,
@@ -8,7 +8,7 @@ from homeassistant.components.light import (
     LightEntity,
     LightEntityFeature,
 )
-from bleak import BleakClient
+from homeassistant.components.bluetooth import async_ble_device_from_address
 from .const import (
     DOMAIN, 
     CHARACTERISTIC_UUID, 
@@ -22,6 +22,9 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
+# Збільшуємо тайм-аут для повільних/далеких Bluetooth-пристроїв
+CONNECT_TIMEOUT = 20.0  
+
 async def async_setup_entry(hass, entry, async_add_entities):
     async_add_entities([YKDBleLight(entry.data["name"], entry.data["address"])])
 
@@ -33,10 +36,9 @@ class YKDBleLight(LightEntity):
         self._brightness = 255
         self._effect = EFFECT_NONE
         
-        # Для підтримки постійного з'єднання
         self._client = None
         self._lock = asyncio.Lock()
-        self._disconnect_timer = None
+        self._disconnect_timer_handle = None
         
         self._attr_supported_features = LightEntityFeature.EFFECT
         self._attr_effect_list = [EFFECT_NONE] + list(EFFECTS_MAP.keys())
@@ -55,78 +57,94 @@ class YKDBleLight(LightEntity):
     @property
     def color_mode(self): return ColorMode.BRIGHTNESS
 
+    def _reset_disconnect_timer(self):
+        """Скидає таймер роз'єднання без створення неконтрольованих asyncio.Task."""
+        if self._disconnect_timer_handle:
+            self._disconnect_timer_handle.cancel()
+        
+        loop = asyncio.get_running_loop()
+        self._disconnect_timer_handle = loop.call_later(
+            60, lambda: asyncio.create_task(self._async_disconnect_if_idle())
+        )
+
+    async def _async_disconnect_if_idle(self):
+        """Безпечне авто-роз'єднання при простої."""
+        if self._lock.locked():
+            # Якщо зараз виконується команда, переплануємо відключення
+            self._reset_disconnect_timer()
+            return
+
+        async with self._lock:
+            if self._client:
+                if self._client.is_connected:
+                    _LOGGER.debug("Closing idle Bluetooth connection for %s", self._name)
+                    try:
+                        await self._client.disconnect()
+                    except Exception as err:
+                        _LOGGER.warning("Error disconnecting from %s: %s", self._address, err)
+                self._client = None
+
     async def _get_client(self):
-            """Отримує існуючий клієнт або створює новий через retry-connector."""
-            if self._client is not None and self._client.is_connected:
-                self._reset_disconnect_timer()
-                return self._client
-            
-            # Отримуємо BLE пристрій з системи (це важливо для стабільності)
-            from homeassistant.components.bluetooth import async_ble_device_from_address
-            device = async_ble_device_from_address(self.hass, self._address, connectable=True)
-            
-            if not device:
-                raise Exception(f"Пристрій {self._address} не знайдено в радіусі дії")
-    
-            # Використовуємо рекомендований метод підключення
-            self._client = await establish_connection(
-                BleakClient, 
-                device, 
-                self._name, 
-                use_services_cache=True,
-                disconnected_callback=lambda client: _LOGGER.debug("Device %s disconnected", self._address)
-            )
-            
+        """Отримує існуючий клієнт або створює новий."""
+        if self._client is not None and self._client.is_connected:
             self._reset_disconnect_timer()
             return self._client
 
-    def _reset_disconnect_timer(self):
-        """Скидає таймер роз'єднання."""
-        if self._disconnect_timer:
-            self._disconnect_timer.cancel()
+        # Знаходимо BLE пристрій у кеші Home Assistant
+        device = async_ble_device_from_address(self.hass, self._address, connectable=True)
         
-        self._disconnect_timer = asyncio.get_event_loop().call_later(
-            60, lambda: asyncio.create_task(self._async_disconnect())
-        )
+        if not device:
+            raise BleakNotFoundError(f"Пристрій {self._address} не знайдено в радіусі дії")
 
-    async def _async_disconnect(self):
-        """Роз'єднує клієнт по таймеру."""
-        async with self._lock:
-            if self._client and self._client.is_connected:
-                _LOGGER.debug("Closing idle Bluetooth connection for %s", self._name)
-                await self._client.disconnect()
-            self._client = None
+        # Надійне встановлення з'єднання з повторними спробами
+        self._client = await establish_connection(
+            client_class=None,  # Використовує внутрішню стандартну обгортку bleak_retry_connector
+            device=device, 
+            name=self._name, 
+            max_attempts=3,
+            disconnected_callback=self._on_disconnected,
+            use_services_cache=True,
+        )
+        
+        self._reset_disconnect_timer()
+        return self._client
+
+    def _on_disconnected(self, client):
+        """Обробник розриву з'єднання зі сторони пристрою."""
+        _LOGGER.debug("Device %s disconnected unexpectedly", self._address)
+        self._client = None
 
     async def _send_commands(self, commands):
-            """Відправка списку команд в одній сесії."""
-            async with self._lock:
-                try:
-                    # Перевіряємо, чи це нове підключення
-                    is_new_connection = self._client is None or not self._client.is_connected
+        """Відправка списку команд в одній сесії з обробкою винятків."""
+        async with self._lock:
+            try:
+                is_new_connection = self._client is None or not self._client.is_connected
+                
+                # Обгортаємо підключення у Timeout
+                client = await asyncio.wait_for(self._get_client(), timeout=CONNECT_TIMEOUT)
+                
+                if is_new_connection:
+                    await asyncio.sleep(0.5)
+                
+                for cmd in commands:
+                    await client.write_gatt_char(
+                        CHARACTERISTIC_UUID, 
+                        bytearray.fromhex(cmd), 
+                        response=False
+                    )
+                    await asyncio.sleep(0.15)
                     
-                    client = await self._get_client()
-                    
-                    # Якщо ми щойно підключилися, даємо контролеру 0.5 сек 
-                    # "прийти до тями", перш ніж штовхати в нього команди
-                    if is_new_connection:
-                        await asyncio.sleep(0.5)
-                    
-                    for cmd in commands:
-                        # КЛЮЧОВА ЗМІНА: додаємо response=False
-                        # Це змушує HA відправляти команду миттєво, не чекаючи відповіді
-                        await client.write_gatt_char(
-                            CHARACTERISTIC_UUID, 
-                            bytearray.fromhex(cmd), 
-                            response=False
-                        )
-                        # Пауза між командами, щоб примітивний чіп встиг їх "перетравити"
-                        await asyncio.sleep(0.2)
-                        
-                    return True
-                except Exception as e:
-                    _LOGGER.error("BLE Error for %s: %s", self._address, e)
-                    self._client = None
-                    return False
+                self._reset_disconnect_timer()
+                return True
+
+            except asyncio.TimeoutError:
+                _LOGGER.error("Тайм-аут підключення до %s (%ds вийшли)", self._address, int(CONNECT_TIMEOUT))
+                self._client = None
+                return False
+            except Exception as e:
+                _LOGGER.error("BLE Error for %s: %s", self._address, e)
+                self._client = None
+                return False
 
     async def async_turn_on(self, **kwargs):
         commands = [CMD_ON]
