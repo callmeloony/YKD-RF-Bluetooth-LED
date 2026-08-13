@@ -1,6 +1,8 @@
 import logging
 import asyncio
+from bleak import BleakClient
 from bleak_retry_connector import establish_connection, BleakNotFoundError
+
 from homeassistant.components.light import (
     ATTR_BRIGHTNESS,
     ATTR_EFFECT,
@@ -9,6 +11,7 @@ from homeassistant.components.light import (
     LightEntityFeature,
 )
 from homeassistant.components.bluetooth import async_ble_device_from_address
+
 from .const import (
     DOMAIN, 
     CHARACTERISTIC_UUID, 
@@ -22,7 +25,7 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
-# Збільшуємо тайм-аут для повільних/далеких Bluetooth-пристроїв
+# Таймаут встановлення з'єднання
 CONNECT_TIMEOUT = 20.0  
 
 async def async_setup_entry(hass, entry, async_add_entities):
@@ -58,7 +61,7 @@ class YKDBleLight(LightEntity):
     def color_mode(self): return ColorMode.BRIGHTNESS
 
     def _reset_disconnect_timer(self):
-        """Скидає таймер роз'єднання без створення неконтрольованих asyncio.Task."""
+        """Скидає таймер роз'єднання без утворення завислих тасків."""
         if self._disconnect_timer_handle:
             self._disconnect_timer_handle.cancel()
         
@@ -68,9 +71,8 @@ class YKDBleLight(LightEntity):
         )
 
     async def _async_disconnect_if_idle(self):
-        """Безпечне авто-роз'єднання при простої."""
+        """Авто-відключення при простої в 60 секунд."""
         if self._lock.locked():
-            # Якщо зараз виконується команда, переплануємо відключення
             self._reset_disconnect_timer()
             return
 
@@ -84,23 +86,27 @@ class YKDBleLight(LightEntity):
                         _LOGGER.warning("Error disconnecting from %s: %s", self._address, err)
                 self._client = None
 
+    def _on_disconnected(self, client):
+        """Обробник несподіваного розриву зв'язку."""
+        _LOGGER.debug("Device %s disconnected unexpectedly", self._address)
+        self._client = None
+
     async def _get_client(self):
-        """Отримує існуючий клієнт або створює новий."""
+        """Отримує клієнт або створює новий через establish_connection."""
         if self._client is not None and self._client.is_connected:
             self._reset_disconnect_timer()
             return self._client
 
-        # Знаходимо BLE пристрій у кеші Home Assistant
         device = async_ble_device_from_address(self.hass, self._address, connectable=True)
         
         if not device:
             raise BleakNotFoundError(f"Пристрій {self._address} не знайдено в радіусі дії")
 
-        # Надійне встановлення з'єднання з повторними спробами
+        # Передаємо саме клас BleakClient першим аргументом
         self._client = await establish_connection(
-            client_class=None,  # Використовує внутрішню стандартну обгортку bleak_retry_connector
-            device=device, 
-            name=self._name, 
+            BleakClient,
+            device, 
+            self._name, 
             max_attempts=3,
             disconnected_callback=self._on_disconnected,
             use_services_cache=True,
@@ -109,20 +115,16 @@ class YKDBleLight(LightEntity):
         self._reset_disconnect_timer()
         return self._client
 
-    def _on_disconnected(self, client):
-        """Обробник розриву з'єднання зі сторони пристрою."""
-        _LOGGER.debug("Device %s disconnected unexpectedly", self._address)
-        self._client = None
-
     async def _send_commands(self, commands):
-        """Відправка списку команд в одній сесії з обробкою винятків."""
+        """Послідовна відправка команд контролеру."""
         async with self._lock:
             try:
                 is_new_connection = self._client is None or not self._client.is_connected
                 
-                # Обгортаємо підключення у Timeout
+                # Обгортаємо виклики підключення у таймаут
                 client = await asyncio.wait_for(self._get_client(), timeout=CONNECT_TIMEOUT)
                 
+                # Пауза після підключення для стабілізації чіпа
                 if is_new_connection:
                     await asyncio.sleep(0.5)
                 
@@ -141,6 +143,7 @@ class YKDBleLight(LightEntity):
                 _LOGGER.error("Тайм-аут підключення до %s (%ds вийшли)", self._address, int(CONNECT_TIMEOUT))
                 self._client = None
                 return False
+                
             except Exception as e:
                 _LOGGER.error("BLE Error for %s: %s", self._address, e)
                 self._client = None
